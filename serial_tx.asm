@@ -114,6 +114,6 @@ text:
     .asciiz "Hello, 65uino World!\r\n"
   
 .org 0x1ffa
-    dw start
-    dw start
-    dw start
+    dw start            ; nmi vector
+    dw start            ; reset vector  
+    dw start            ; irq vector
