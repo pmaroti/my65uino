@@ -7,11 +7,17 @@ BAUDRATE = 4800
 TX_DELAY = 0.010        # 10 ms
 RX_TIMEOUT = 1.0        # seconds
 MESSAGES = [
-    "R",
-    "?",
-    "T",
-    "A1234",
-    "?"
+    "R",            # set address to 0x0000
+    "T",            # toggle trace on
+    "A0030",        # set address to 0x0030
+    "?",            # display address
+    "PA9", "P55",   # put opcode for LDA #55
+    "P85", "P1F",   # put opcode for STA $1F
+    "P60",          # put opcode for RTS
+    "A0030",        # set address to 0x0030
+    "D",            # display memory
+    "A0030",        # set address to 0x0030
+    "G" ,           # execute from 0x0030
 ]
 
 # Open serial port
