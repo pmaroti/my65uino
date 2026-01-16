@@ -9,22 +9,9 @@ RX_TIMEOUT = 1.0        # seconds
 MESSAGES = [
     "R",
     "?",
-    "P01",
-    "P02",
-    "P03",
-    "P04",
-    "P05",
-    "P06",
-    "P07",
-    "P08",
-    "P0A",
-    "P0B",
-    "P0C",
-    "P0D",
-    "P0E",
-    "P0F",
-    "R",
-    "D"
+    "T",
+    "A1234",
+    "?"
 ]
 
 # Open serial port

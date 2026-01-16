@@ -1,15 +1,21 @@
 .6502
 
 ; this program is a simple monitor program that support the following commands:
-; B - blink the LED once for 1second
-; AXXXX - set address, where XXXX is 4 hex digits
-; ? - display current address
-; D - dump 16 bytes from the current address, and increment address by 16
-; PXX - put byte XX at current address, increment address by 1
-; G - start execution on the current address
-; R - set address to 0x0000
-; T - toggle debug flag
-; it uses the 6532 timer to generate delays for serial output
+;       B           - blink the LED once for approx 1second
+;       AXXXX       - set address, where XXXX is 4 hex digits
+;       ?           - display current address
+;       D           - dump 16 bytes from the current address, and increment address by 16
+;       PXX         - put byte XX at current address, increment address by 1
+;       G           - start execution on the current address
+;       R           - set address to 0x0000
+;       T           - toggle debug flag, which causes dump memory from 0x0010 on each command completion
+; it uses the 6532 timer to generate delays for serial output, and for LED blink timingű
+; it uses a simple bit-banged serial protocol at 4800 baud, 8N1
+; RX is on bit 4 of port B (pin 6 of 6532)
+; TX is on bit 5 of port B (pin 7 of 6532)
+; LED is on bit 7 of port B (pin 9 of 6532)
+; Button is on bit 6 of port B (pin 8 of 6532) --> not used in this version
+; uses 1MHz clock for timing
 
 #define RIOT_BASE 0x80
 #define DRA      RIOT_BASE + 0x00 ;DRA ('A' side data register)
@@ -48,6 +54,10 @@
 #define debug_flag 0x16
 #define temp_addr_low 0x17
 #define temp_addr_high 0x18
+#define add_char1 0x1C
+#define add_char2 0x1B
+#define add_char3 0x1A
+#define add_char4 0x19
 
 #define txbyte 0x20
 #define rxbyte 0x21
@@ -186,7 +196,7 @@ dump_memory_cmd:
 
 ;--------------------------------------------------------------------------------------------
 ; this is the put byte command handler, expects 2 hex digits and puts byte at current address
-;--------------------------------------------------------------------------------------------      
+;--------------------------------------------------------------------------------------------
 put_byte_cmd:
     jsr receive_hex_byte
     ldy #0x00
@@ -202,7 +212,7 @@ no_high_inc2:
 
 ;--------------------------------------------------------------------------------------------
 ; this is the execute command handler, calls to address as subroutine to start execution
-;--------------------------------------------------------------------------------------------  
+;--------------------------------------------------------------------------------------------
 go_execute_cmd:
     jmp $0010       ; jump to address 0x0010 to start execution
                     ; address $10 contains the JSR opcode
@@ -236,7 +246,7 @@ dump_done:
 
 ;--------------------------------------------------------------------------------------------
 ; this send done command handler, sends '#' character followed by CRLF
-;--------------------------------------------------------------------------------------------  
+;--------------------------------------------------------------------------------------------
 send_done:
     lda #0x23      ; send '#' character to indicate done
     jsr sendbyte
@@ -391,6 +401,23 @@ storebit:
     dex
     bne readbitsloop    ; loop until all bits read
     lda rxbyte
+stopbitloop:
+    ; Wait full bit time for stop bit
+    lda #BAUD_DELAY
+    sta WTD8DI           ; start full bit delay in 6532 timer for stop bit
+wait_stopbit:
+    nop
+    lda RRIFR   
+    bpl wait_stopbit    ; wait until timer expires, bit 7 = 0 means not expired
+
+    lda add_char2       ; shift previous address characters it will appear in debug output
+    sta add_char1
+    lda add_char3
+    sta add_char2
+    lda add_char4
+    sta add_char3
+    lda rxbyte
+    sta add_char4
     rts
 
 ;--------------------------------------------------------------------------------------------
@@ -467,6 +494,6 @@ wait_tmr:
     rts
 
 .org 0x1ffa
-    dw start
-    dw start
-    dw start
+    dw start ; NMI vector
+    dw start ; RESET vector
+    dw start ; IRQ vector
