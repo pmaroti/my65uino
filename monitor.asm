@@ -129,40 +129,40 @@ main_loop:
 
 
 toggle_debug_flag_cmd:
-    lda #0x01
-    eor debug_flag
+    lda #0x01               ; toggle debug flag 
+    eor debug_flag     
     sta debug_flag
 
-    jsr send_done
+    jsr send_done          ; send done prompt
     jmp main_loop
 
 ;--------------------------------------------------------------------------------------------
 ; this is the set address command handler, expects 4 hex digits and sets addr_high and addr_low
 ;--------------------------------------------------------------------------------------------    
 set_address_cmd:
-    jsr receive_hex_byte
-    sta addr_high
+    jsr receive_hex_byte        ; get high byte
+    sta addr_high               ; store in addr_high
 
-    jsr receive_hex_byte
-    sta addr_low
+    jsr receive_hex_byte        ; get low byte
+    sta addr_low                ; store in addr_low
 
-    jsr send_done
+    jsr send_done               ; send done prompt
     jmp main_loop
 
 ;--------------------------------------------------------------------------------------------
 ; this is the reset address command handler, sets address to 0x0000
 ;--------------------------------------------------------------------------------------------
 reset_address_cmd:
-    lda addr_low
+    lda addr_low            ; save current address as old address
     sta old_addr_low
     lda addr_high
     sta old_addr_high
 
-    lda #0x00
+    lda #0x00                ; set address to 0x0000
     sta addr_high
     sta addr_low
 
-    jsr send_done
+    jsr send_done           ; send done prompt
     jmp main_loop
 
 ;--------------------------------------------------------------------------------------------
@@ -171,43 +171,43 @@ reset_address_cmd:
 blink_led_cmd:
     jsr blink_led
 
-    jsr send_done
+    jsr send_done           ; send done prompt  
     jmp main_loop
 
 ;--------------------------------------------------------------------------------------------
 ; this is the display address command handler, displays current address
 ;--------------------------------------------------------------------------------------------  
 display_address_cmd:
-    lda addr_high
-    jsr send_hex_byte
+    lda addr_high           ; send high byte of address
+    jsr send_hex_byte       ; as hex byte
     
-    lda addr_low
-    jsr send_hex_byte
+    lda addr_low            ; send low byte of address
+    jsr send_hex_byte       ; as hex byte
 
-    jsr send_crln
-    jmp main_loop
+    jsr send_crln           ; send CRLF
+    jmp main_loop   
 
 ;--------------------------------------------------------------------------------------------
 ; this is the dump memory command handler, dumps 16 bytes from current address
 ;--------------------------------------------------------------------------------------------  
 dump_memory_cmd:
-    jsr do_dump
+    jsr do_dump             ; dump 16 bytes from current address
     jmp main_loop
 
 ;--------------------------------------------------------------------------------------------
 ; this is the put byte command handler, expects 2 hex digits and puts byte at current address
 ;--------------------------------------------------------------------------------------------
 put_byte_cmd:
-    jsr receive_hex_byte
-    ldy #0x00
-    sta (addr_low),Y
+    jsr receive_hex_byte    ; get byte to put in receive_byte
+    ldy #0x00               ; Y=0 for indirect addressing
+    sta (addr_low),Y        ; store byte to memory at address
 
-    inc addr_low
-    bne no_high_inc2
-    inc addr_high
+    inc addr_low            ; increment low byte of address
+    bne no_high_inc2        ; if no overflow, skip high byte increment
+    inc addr_high           ; increment high byte of address
 no_high_inc2:
 
-    jsr send_done
+    jsr send_done           ; send done prompt
     jmp main_loop
 
 ;--------------------------------------------------------------------------------------------
@@ -221,55 +221,61 @@ go_execute_cmd:
     jsr send_done
     jmp main_loop
 
+;--------------------------------------------------------------------------------------------
+; this is the real implementatin of dump memory: dumps 16 bytes from current address
+;-------------------------------------------------------------------------------------------- 
 do_dump:
-    lda #16
+    lda #16              ; dump 16 bytes
     sta cntr1
 dump_loop:
-    ldy #0x00
-    lda (addr_low),Y
-    jsr send_hex_byte
+    ldy #0x00           ; Y=0 for indirect addressing
+    lda (addr_low),Y    ; load byte from memory at address
+    jsr send_hex_byte   ; send byte as hex
 
-    inc addr_low
-    bne no_high_inc
-    inc addr_high
+    inc addr_low        ; increment low byte of address
+    bne no_high_inc     ; if no overflow, skip high byte increment
+    inc addr_high       ; increment high byte of address
 no_high_inc:
 
-    dec cntr1
-    beq dump_done
+    dec cntr1           ; decrement byte counter
+    beq dump_done       ; if zero, done
 
-    lda #0x20
-    jsr sendbyte
-    jmp dump_loop
+    lda #0x20           ; send space between bytes
+    jsr sendbyte        
+    jmp dump_loop       ; repeat for next byte
 dump_done:
-    jsr send_crln
+    jsr send_crln       ; send CRLF
     rts    
 
 ;--------------------------------------------------------------------------------------------
 ; this send done command handler, sends '#' character followed by CRLF
 ;--------------------------------------------------------------------------------------------
 send_done:
-    lda #0x23      ; send '#' character to indicate done
+    lda #0x23           ; send '#' character to indicate done
     jsr sendbyte
 
     lda debug_flag
-    beq skip_debug
+    beq skip_debug      ; skip debug dump if debug flag is clear
 
-    lda addr_low
+    lda addr_low        ; save current address
     sta temp_addr_low
     lda addr_high
     sta temp_addr_high
-    lda #0x10
+
+    lda #0x10           ; set address to 0x0010 for debug dump
     sta addr_low
     lda #0x00
     sta addr_high
-    jsr do_dump
-    lda temp_addr_low
+
+    jsr do_dump         ; dump 16 bytes from 0x0010
+
+    lda temp_addr_low   ; restore original address
     sta addr_low
     lda temp_addr_high
     sta addr_high
 
 skip_debug:
-    jsr send_crln
+    jsr send_crln       ; send CRLF
     rts
 
 ;--------------------------------------------------------------------------------------------
@@ -402,13 +408,22 @@ storebit:
     bne readbitsloop    ; loop until all bits read
     lda rxbyte
 stopbitloop:
-    ; Wait full bit time for stop bit
-    lda #BAUD_DELAY
-    sta WTD8DI           ; start full bit delay in 6532 timer for stop bit
+    ; Wait at least half bit time for stop bit
+    lda #HALF_DELAY
+    sta WTD8DI          ; waiting only half bit delay in 6532 timer for stop bit
+                        ; means the stop bit is just will became 1 so during the
+                        ; stop bit time (at least 208us at 4800 baud)
+                        ; the program can process the received byte information
 wait_stopbit:
     nop
     lda RRIFR   
     bpl wait_stopbit    ; wait until timer expires, bit 7 = 0 means not expired
+    ; Now stop bit should be valid (line high)
+wait_more:
+    lda DRB
+    and #0b0001_0000    ; Mask to check RX line (bit 4)
+    beq wait_more       ; if RX line is low, keep waiting for stop bit to be valid
+    ; Stop bit is valid (line is high), done receiving byte
 
     lda add_char2       ; shift previous address characters it will appear in debug output
     sta add_char1
@@ -493,7 +508,8 @@ wait_tmr:
     bne delayn_loop
     rts
 
-.org 0x1ffa
+;.org 0x1ffa
+.org 0x17fa
     dw start ; NMI vector
     dw start ; RESET vector
     dw start ; IRQ vector
