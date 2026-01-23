@@ -1,119 +1,28 @@
-    /*
-      MC6850-compatible ACIA (Asynchronous Communications Interface Adapter)
-
-      Overview
-      --------
-      This file implements a functional model of the Motorola MC6850 ACIA,
-      split into three modules:
-        - acia_6850      : Top-level bus interface and submodule integration.
-        - acia_6850_ctl  : Status/Control register logic and IRQ generation.
-        - acia_6850_rx   : Receive datapath and state machine.
-        - acia_6850_tx   : Transmit datapath and state machine.
-
-      Bus Interface (CPU side)
-      ------------------------
-      - clk      : System clock driving all synchronous logic.
-      - reset    : Asynchronous reset (active high) for internal state.
-      - cs       : Chip-select. When high, this ACIA responds on the data bus.
-      - e_clk    : MC680x E-clock phase qualifier for bus cycles; used to align
-                   register read/write strobes to the CPU bus timing.
-      - rw_n     : Read/Write select (active-low write). 1 = read, 0 = write.
-      - rs       : Register select. 0 selects status/control space, 1 selects
-                   data register space (TX write / RX read).
-      - data_in  : CPU data bus input when writing.
-      - data_out : CPU data bus output when reading. It is formed by OR-ing the
-                   outputs of RX and CTL submodules; data_en ensures only the
-                   selected submodule actively drives non-zero while the other
-                   presents 0x00 to avoid bus contention.
-      - data_en  : Enables `data_out` onto the host bus during reads.
-
-      Serial Interface (line side)
-      ----------------------------
-      - txclk/rxclk : Baud-rate clocks or oversampling clocks. Depending on
-                      `cds` (Clock Divide Select) the design either uses the
-                      raw edges directly (cds==00) or generates strobes by
-                      dividing rxclk/txclk by 16 or 64.
-      - rxdata      : Asynchronous serial receive input (idle high).
-      - txdata      : Asynchronous serial transmit output (idle high).
-      - cts_n       : Clear-To-Send input (active low). When high, TX is held off
-                      except for break generation per `tc`.
-      - dcd_n       : Data-Carrier-Detect input (active low). When high (no
-                      carrier), RX status bit0 indicates empty and DCD-related
-                      interrupts/flags behave per MC6850 semantics.
-      - rts_n       : Request-To-Send output (active low). Asserted low when
-                      transmitter is ready per control register and TDRE.
-      - irq_n       : Interrupt request output (active low). Asserted for RX, TX,
-                      overrun, and DCD events per control register `rie`.
-
-      Control/Status Summary
-      ----------------------
-      Control register (`ctrl_reg`):
-        [7] RIE  : Receiver Interrupt Enable.
-        [6:5] TC : Transmit Control
-                    00,01 : normal operation
-                    10    : RTS high, inhibit TX (implementation-specific gating)
-                    11    : Send break when TDRE=1 (forces continuous zero, no stops)
-        [4:2] WS : Word Select
-                    bit2: 0=7-bit data, 1=8-bit data
-                    bit1/bit0: parity and stop configuration:
-                      000,001 : 7/8 data + parity enabled (even/odd) + 2 stop bits
-                      010,011 : 7/8 data + parity enabled (even/odd) + 1 stop bit
-                      100,101 : 7/8 data, no parity; 2/1 stop bits respectively
-                      110,111 : 7/8 data + parity enabled (even/odd) + 1 stop bit
-                    Parity mapping used in code:
-                      Even parity for WS in {000,010,110}
-                      Odd  parity for WS in {001,011,111}
-                      No parity for WS in {100,101}
-        [1:0] CDS : Clock Divide Select
-                    00 : no division, use edge-qualified rxclk/txclk directly
-                    01 : divide by 16 (generate mid-bit sample strobes)
-                    10 : divide by 64 (generate mid-bit sample strobes)
-                    11 : Master Clear (MCLR) when both bits are 1
-
-      Status register (`status_reg`):
-        [7] IRQ  : Latched IRQ status mirror (set when any enabled event occurs).
-        [6] PE   : Parity Error (latched with data when RDRF transfers).
-        [5] OVR  : Overrun Error (sticky until status then data read sequence).
-        [4] FE   : Framing Error (stop-bit sample low).
-        [3] CTSn : Immediate reflection of input CTS_n (1=not clear to send).
-        [2] DCDf : DCD flag (tracks DCD transitions per MC6850 behavior).
-        [1] TDRE : Transmit Data Register Empty gated by CTS (only 1 when CTS_n=0). 
-                   aka when set, indicates ready to accept new TX data.
-        [0] RDRF : Receive Data Register Full gated by DCD (only 1 when DCD_n=0).
-                   aka when set, indicates new RX data is available to read.
-
-      Notes on gating and bus-multiplexing
-      ------------------------------------
-      - `data_out` is `w_data_rx | w_data_ctrl`. Only the selected block drives a
-        non-zero value during read cycles. `data_en` ensures timing and visibility
-        on the bus only when `cs & rw_n & e_clk` is true.
-      - The implementation contains debug `$display` in TX write path for tracing.
-        This is simulation-only; synthesis tools will ignore or warn; remove if
-        undesired.
-    */
 module acia_6850
 (
-  input        clk,
-  input        reset,
-  input        cs,
-  input        e_clk,
-  input        rw_n,
-  input        rs,
-  input  [7:0] data_in,
-  output [7:0] data_out,
-  output       data_en,
-  input        txclk,
-  input        rxclk,
-  input        rxdata,
-  input        cts_n,
-  input        dcd_n,
-  output       irq_n,
-  output       txdata,
-  output       rts_n
+  input        clk, // System clock for the module
+  input        reset, // Asynchronous reset, high active
+  input        cs, // Chip select active high
+  input        e_clk,  // Enable clock for the ACIA for register access, bus operations
+  input        rw_n, // Read/Write control, high = read, low = write
+  input        rs,  // address select, 0 = control/status, 1 = data register rx/tx
+  input  [7:0] data_in, // Data input bus 8 bit wide
+  output [7:0] data_out, // Data output bus 8 bit wide
+  output       data_en, // Data output enable signal
+  input        txclk, // Transmit clock input it should be the baud rate clock or it will be divided down from it
+                      // as falling edge is used with clked signal it shoule be lower than system clk to avoid
+                      // metastability issues and missing edges
+  input        rxclk, // same as txclk but for receive side
+  input        rxdata, // Received serial data input (idle high)
+  input        cts_n, // Clear to send, active low (clear to send means we are allowed to send data)
+  input        dcd_n, // Data carrier detect, active low (data carrier detect means we are connected)
+  output       irq_n, // Interrupt request, active low (active means CPU should service interrupt)
+  output       txdata, // Transmit serial data output (idle high)
+  output       rts_n // Request to send, active low (active low means we are ready to receive data)
 );
 
-  wire [7:0] w_data_rx;
-  wire       w_data_rx_en;
+  wire [7:0] w_data_rx; // Data output from receiver
+  wire       w_data_rx_en; 
   wire [7:0] w_data_ctrl;
   wire       w_data_ctrl_en;
   wire       w_rdrf;
@@ -131,7 +40,7 @@ module acia_6850
   assign data_out = w_data_rx | w_data_ctrl;
   assign irq_n    = w_irq_n;
 
-  acia_6850_ctl U_acia_6850_ctl
+  acia_6850_ctl U_acia_6850_ctl // Control and status register module 
   (
     .clk(clk),
     .reset(reset),
@@ -157,47 +66,29 @@ module acia_6850
     .irq_n(w_irq_n)
   );
 
-      // Receiver: samples rxdata with filter, generates strobes based on `cds`
-      // (clock divide select) assembles data bits, parity/stop checking,
-      // flags (RDRF, OVR, PE, FE),
-      // and provides the read data register.
-  acia_6850_rx U_acia_6850_rx
+  acia_6850_rx U_acia_6850_rx // Receiver module
   (
     .clk(clk),
     .reset(reset),
-      // Internal CPU-bus data paths:
-      // - w_data_rx     : Read data from RX data register (when rs=1, rw=read).
-      // - w_data_ctrl   : Read data from status register (when rs=0, rw=read).
-      // - w_data_*_en   : Qualifiers for bus timing visibility via e_clk.
     .mclr(w_mclr),
     .cs(cs),
     .e_clk(e_clk),
     .rw_n(rw_n),
-      // Status bits from RX/TX paths and line monitors:
     .rs(rs),
     .data_out(w_data_rx),
     .data_en(w_data_rx_en),
     .ws(w_ws),
     .cds(w_cds),
-      // Control signals derived from control register:
     .rxclk(rxclk),
     .rxdata(rxdata),
     .rdrf(w_rdrf),
     .ovr(w_ovr),
     .pe(w_pe),
     .fe(w_fe)
-      // Bus read enable when reading (rw_n=1) during E phase.
   );
-      // Data bus mux: OR-combine; only one source drives non-zero under data_en.
 
-      // IRQ is driven directly by control block.
-
-      // Transmitter: manages TX data register, shift register, parity/stop
-      // generation, CTS gating, TDRE handling and break behavior (tc==11).      
-  acia_6850_tx U_acia_6850_tx
+  acia_6850_tx U_acia_6850_tx // Transmitter module
   (
-      // Control/Status block: implements status register, control register,
-      // interrupt generation, RTS management and exposes derived control fields.
     .clk(clk),
     .reset(reset),
     .mclr(w_mclr),
@@ -207,9 +98,7 @@ module acia_6850
     .rs(rs),
     .data_in(data_in),
     .cts_n(cts_n),
-    .tc(w_tc),  // Transmit control from control register
-      // Transmit datapath: manages TX data register, shift register, parity/stop 
-      // generation, CTS gating, TDRE handling and break behavior (tc==11).
+    .tc(w_tc),
     .ws(w_ws),
     .cds(w_cds),
     .tdre(w_tdre),
@@ -219,14 +108,17 @@ module acia_6850
 
 endmodule
 
-module acia_6850_ctl
-(
-  input        clk,
-  input        reset,
-  input        cs,
-  input        e_clk,
-  input        rw_n,
+//----------------------------------------------------------------------
 
+module acia_6850_ctl // Control and status register module which handles the control and status registers
+                     // of the ACIA 6850 and generates the interrupt request signal, connect CPU control signals
+                     // and monitors status signals from receiver and transmitter modules.
+(
+  input        clk, // System clock for the module
+  input        reset, // Asynchronous reset, high active
+  input        cs, // Chip select active high
+  input        e_clk, // Enable clock for the ACIA for register access, bus operations
+  input        rw_n,
   input        rs,
   input  [7:0] data_in,
   output [7:0] data_out,
@@ -249,35 +141,21 @@ module acia_6850_ctl
   output reg   irq_n    // Interrupt request.
 );
 
-
-      // ctrl_reg   : Latched control register written when rs=0 and write strobe.
-      // status_reg : Combinational view of status bits; read when rs=0 and read.
-      // rie        : Receiver Interrupt Enable (ctrl_reg[7]).
-      // irq_i      : Internal mirror of IRQ source latch (feeds status[7]).
-      // cts_i_n    : Synchronized sample of CTS_n to system clock.
-      // dcd_i_n    : Synchronized sample of DCD_n to system clock.
-      // dcd_flag_n : Sticky DCD flag reflected in status[2] per MC6850 behavior.
-      // ovr_lock   : Prevents immediate clearing of overrun-related IRQ until
-      //              the prescribed read sequence (status then data) occurs.
-      // dcd_lock   : Unused/legacy in this implementation; reserved for future.
-      // dcd_trans  : Detects low-to-high transition of DCD_n for IRQ generation.
-      // read_lock  : Ensures proper read ordering before resetting DCD flag.
-      // dcd_release: Helper to release DCD flag when sequence completes.
-  reg  [7:0] ctrl_reg;
-  wire [7:0] status_reg;
-  wire       rie;   // Receiver interrupt enable.
-  reg        irq_i;
-  reg        cts_i_n; // Synchronized CTS_n.
-  reg        dcd_i_n; // Synchronized DCD_n.
-  reg        dcd_flag_n;  // DCD flag status bit.
-  reg        ovr_lock;
-  reg        dcd_lock;
-  reg        dcd_trans;
-  reg        read_lock;
-  reg        dcd_release;
+  reg  [7:0] ctrl_reg; // Control register
+  wire [7:0] status_reg; // Status register
+  wire       rie; // Receiver interrupt enable
+  reg        irq_i;  // Internal IRQ status flag
+  reg        cts_i_n;  // Sampled CTSn
+  reg        dcd_i_n; // Sampled DCDn
+  reg        dcd_flag_n; // DCD flag, active low
+  reg        ovr_lock; // Overrun lock
+  reg        dcd_lock;  // DCD lock
+  reg        dcd_trans; // DCD transition flag
+  reg        read_lock; // Read lock
+  reg        dcd_release; // DCD release
 
 
-  always @(posedge clk) begin
+always @(posedge clk) begin // Sample the input control signals with the system clock011aÍ`q2
     cts_i_n <= cts_n; // Sample CTSn on the negative clock edge.
     dcd_i_n <= dcd_n; // Sample DCDn on the negative clock edge.
   end
@@ -291,35 +169,31 @@ module acia_6850_ctl
   assign status_reg[1] = tdre & ~cts_i_n; // No TDRE for CTS_n = '1'.
   assign status_reg[0] = rdrf & ~dcd_i_n; // DCD_n = '1' indicates empty.
   
-  assign data_out = (cs & rw_n & ~rs) ? status_reg : 8'h00;  // Status register read.
+  assign data_out = (cs & rw_n & ~rs) ? status_reg : 8'h00;
   assign data_en  = (cs & rw_n & ~rs) ? e_clk : 1'b0;
   
-  assign mclr     = (ctrl_reg[1:0] == 2'b11) ? 1'b1 : 1'b0; // Master clear when both bits are 1.
+  assign mclr     = (ctrl_reg[1:0] == 2'b11) ? 1'b1 : 1'b0;
   assign rts_n    = ((ctrl_reg[6:5] != 2'b10) && (tdre)) ? 1'b0 : 1'b1;
-  assign cds      = ctrl_reg[1:0]; // Clock divide select bits.
-  assign ws       = ctrl_reg[4:2]; // Word select bits.
-  assign tc       = ctrl_reg[6:5]; // Transmit control bits.
-  assign rie      = ctrl_reg[7]; // Receiver interrupt enable.
+  assign cds      = ctrl_reg[1:0];
+  assign ws       = ctrl_reg[4:2];
+  assign tc       = ctrl_reg[6:5];
+  assign rie      = ctrl_reg[7];
 
-  always @(posedge reset or posedge clk) begin // This handles the IRQ generation.
+  always @(posedge reset or posedge clk) begin
     if (reset) begin
       ovr_lock = 1'b0;
       irq_n   <= 1'b1;
       irq_i   <= 1'b0;
     end else begin
       // Transmitter interrupt:
-          // Transmitter interrupt: when TDRE=1 (data register empty), TC==01
-          // (enable TX IRQ) and CTS_n==0 (clear to send), assert IRQ.      
       if ((tdre) && (ctrl_reg[6:5] == 2'b01) && (!cts_i_n)) begin
         irq_n <= 1'b0;
         irq_i <= 1'b1;
       end
       else if (cs & ~rw_n & rs & e_clk) begin
-        irq_n <= 1'b1; // Clear IRQ by writing to the transmit data register.
+        irq_n <= 1'b1; // Clear by writing to the transmit data register.
       end
       // Receiver interrupts:
-          // Receiver data interrupt: when RDRF=1 and RIE=1 and DCD_n==0
-          // (carrier present), assert IRQ; clear on reading RX data.      
       if ((rdrf) && (rie) && (!dcd_i_n)) begin
         irq_n <= 1'b0;
         irq_i <= 1'b1;
@@ -327,23 +201,14 @@ module acia_6850_ctl
       else if (cs & rw_n & rs & e_clk) begin
         irq_n <= 1'b1; // Clear by reading the receive data register.
       end
-  // This process is some kind of tricky. Refer to the MC6850 data
-  // sheet for more information.
-          // Overrun interrupt: sticky until status then data read sequence.
-      // This interrupt source must initialise low.       
       if ((ovr) && (rie)) begin
         irq_n <= 1'b0;
         irq_i <= 1'b1;
         ovr_lock = 1'b1;
-        // Synchronize modem control inputs to avoid metastability and provide
-        // a stable sample for status/IRQ logic.
       end
       else if (cs & rw_n & ~rs & e_clk) begin
         ovr_lock = 1'b0; // Enable reset by reading the status.
       end
-       // Status register bit mapping:
-       // [7] IRQ mirror, [6] PE, [5] OVR, [4] FE, [3] CTS_n (reflected),
-       // [2] DCD flag, [1] TDRE gated by CTS, [0] RDRF gated by DCD.
       else if (cs & rw_n & rs & e_clk & ~ovr_lock) begin
         irq_n <= 1'b1; // Clear by reading the receive data register after the status.
       end
@@ -353,11 +218,9 @@ module acia_6850_ctl
         // DCD_TRANS is used to detect a low to high transition of DCDn.
         dcd_trans = 1'b1;
       end
-      // CPU bus read of status when rs=0.
       else if (cs & rw_n & rs & e_clk & ~ovr_lock) begin
         irq_n <= 1'b1;
         // Clear by reading the receive data register after the status.
-      // Control field decodes from ctrl_reg.
       end
       else if (!dcd_i_n) begin
         dcd_trans = 1'b0;
@@ -372,22 +235,22 @@ module acia_6850_ctl
     end
   end
 
-
-  always @(posedge reset or posedge clk) begin // Control register write process.
-    if (reset) begin //  On reset condition initialize control register.
+  always @(posedge reset or posedge clk) begin
+    if (reset) begin
       ctrl_reg <= 8'b01000000;
     end else begin
       if (cs & ~rw_n & ~rs & e_clk) begin
         ctrl_reg <= data_in;
       end
-
     end
   end
 
-  always @(posedge reset or posedge clk) begin : P1 // This section handles DCD (Data Carrier Detect) flag.
+  // This process is some kind of tricky. Refer to the MC6850 data
+  // sheet for more information.
+  always @(posedge reset or posedge clk) begin : P1
     if (reset) begin
       dcd_flag_n <= 1'b0;
-
+      // This interrupt source must initialise low.
       read_lock   = 1'b1;
       dcd_release = 1'b0;
     end else begin
@@ -398,8 +261,6 @@ module acia_6850_ctl
       else if (dcd_i_n) begin
         dcd_flag_n <= 1'b1;
       end
-          // DCD transition interrupt (low->high): requires RIE and is cleared
-          // by the status-then-data read sequence similar to overrun handling.
       else if (cs & rw_n & ~rs & e_clk) begin
         read_lock = 1'b0;
         // Un-READ_LOCK if receiver data register is read.
@@ -413,7 +274,6 @@ module acia_6850_ctl
       end
       else if ((!dcd_i_n) && (dcd_release)) begin
         dcd_flag_n <= 1'b0;
-          // IRQ status flag reset mirrors the above clear locations.
         dcd_release = 1'b0;
       end
     end
@@ -429,7 +289,6 @@ module acia_6850_rx
   input        cs,
   input        e_clk,
   input        rw_n,
-            // Control register write (RS=0, RW=0). Decodes: RIE, TC, WS, CDS/MCLR.
   input        rs,
   output [7:0] data_out,
   output       data_en,
@@ -495,14 +354,6 @@ localparam [2:0]
     if (cds == 2'b00) begin
       // Divider off.
       if ((rxclk) && (!strb_lock)) begin
-    // Receiver state machine encodes sampling and framing:
-    //   RX_IDLE       : Wait for start bit (rxdata_s goes low).
-    //   RX_WAIT_START : In divided clock modes, confirm start mid-bit.
-    //   RX_SAMPLE     : Sample data bits on clk_strb; 7 or 8 bits per ws[2].
-    //   RX_PARITY     : Sample parity bit when enabled by ws.
-    //   RX_STOP1      : Sample first stop bit; set FE if low.
-    //   RX_STOP2      : Sample second stop bit when selected by ws.
-    //   RX_SYNC       : Transfer shift_reg to data_reg (if RDRF=0), update flags.
         clk_strb <= 1'b1;
         strb_lock = 1'b1;
       end
@@ -512,21 +363,6 @@ localparam [2:0]
       end
       else begin
         clk_strb <= 1'b0;
-      // rcv_state/rcv_next_state : FSM registers.
-      // rxdata_i    : First stage sampler of asynchronous rxdata.
-      // rxdata_s    : Filtered/synchronized rxdata (simple 2-count filter).
-      // data_reg    : Latched receive data presented to CPU when reading.
-      // shift_reg   : Serial-to-parallel shift register during reception.
-      // clk_strb    : Mid-bit sampling strobe derived from rxclk and cds divider.
-      // bitcnt      : Bit counter for 7/8 data bits.
-      // clk_lock    : Ensures one decrement per rxclk edge in divider logic.
-      // strb_lock   : Qualifies single strobe per divider period.
-      // clk_divcnt  : Divider counter for cds==01 (16) or cds==10 (64).
-      // fe_i/fe     : Internal FE sample and latched FE flag.
-      // ovr_i/ovr   : Internal overrun detect and latched overrun flag.
-      // first_read  : Tracks read sequencing for overrun flag clear.
-      // par_tmp/pe_i: Parity accumulation and sampled parity error.
-      // flt_tmp     : Small up/down counter implementing input glitch filter.
       end
     end
     else if (rcv_state == RX_IDLE) begin
@@ -652,7 +488,6 @@ localparam [2:0]
       end
     end
   end
-      // CPU bus read of receiver data when rs=1 and rw=read.
 
   always @(posedge reset or posedge clk) begin
     if (reset) begin
@@ -882,15 +717,6 @@ module acia_6850_tx
   output       txdata
 );
 
-    // Transmitter state machine:
-    //   TX_IDLE       : Wait for data or break condition.
-    //   TX_LOAD_SHIFT : Move data_reg to shift_reg; TDRE set when entering START.
-    //   TX_START      : Drive start bit (0), compute parity.
-    //   TX_SHIFTOUT   : Shift out data bits LSB-first per ws[2].
-    //   TX_PARITY     : Transmit parity bit when enabled by ws.
-    //   TX_STOP1      : Transmit first stop bit; go to STOP2 if two stops selected.
-    //   TX_STOP2      : Transmit second stop bit; then return to IDLE.
-      // preset the CLKDIV with the start delays
 localparam [2:0]
   TX_IDLE       = 3'd0,
   TX_LOAD_SHIFT = 3'd1,
@@ -900,17 +726,6 @@ localparam [2:0]
   TX_STOP1      = 3'd5,
   TX_STOP2      = 3'd6;
 
-    // tr_state/tr_next_state : FSM registers.
-    // clk_strb     : Transmit strobe derived from txclk and cds divider.
-    // data_reg     : Transmit data register written by CPU (rs=1, write).
-    // shift_reg    : Parallel-to-serial shift register for transmission.
-    // bitcnt       : Counts transmitted bits (7/8 depending on ws[2]).
-    // par_tmp      : XOR reduction of shift_reg (even parity base).
-    // parity_i     : Selected parity bit per ws mapping.
-    // tx_lock      : Qualifier to clear TDRE after E falling edge post write.
-    // clk_lock     : Divider edge lock for tx side.
-    // strb_lock    : One-shot strobe lock to prevent double strobes in a period.
-    // clk_divcnt   : Divider counter for cds==01 (16) or cds==10 (64).
 reg [2:0] tr_state;
 reg [2:0] tr_next_state;
 reg       clk_strb;
@@ -924,7 +739,10 @@ reg       clk_lock;
 reg       strb_lock;
 reg [6:0] clk_divcnt;
 
-
+  // The default condition in this statement is to ensure
+  // to cover all possibilities for example if there is a
+  // one hot decoding of the state machine with wrong states
+  // (e.g. not one of the given here).
   assign txdata = (tr_state == TX_IDLE       ) ? 1'b1
                 : (tr_state == TX_LOAD_SHIFT ) ? 1'b1
                 : (tr_state == TX_START      ) ? 1'b0
@@ -933,9 +751,11 @@ reg [6:0] clk_divcnt;
                 : (tr_state == TX_STOP1      ) ? 1'b1
                 : (tr_state == TX_STOP2      ) ? 1'b1 : 1'b1;
                 
-  always @(posedge clk) begin // This section handles the clock divider for TXCLK.
-    if (cds == 2'b00) begin    // divider off
+  always @(posedge clk) begin
+    if (cds == 2'b00) begin
+      // divider off
       if ((!txclk) && (!strb_lock)) begin
+        // Works on negative TXCLK edge.
         clk_strb  <= 1'b1;
         strb_lock <= 1'b1;
       end
@@ -949,6 +769,7 @@ reg [6:0] clk_divcnt;
       clk_lock  <= 1'b0;
     end
     else if (tr_state == TX_IDLE) begin
+      // preset the CLKDIV with the start delays
       if (cds == 2'b01) begin
         clk_divcnt <= 7'd16; // div by 16 mode
       end
@@ -957,9 +778,8 @@ reg [6:0] clk_divcnt;
       end
       clk_strb <= 1'b0;
     end
-   
     else begin
-      // Strobe to 1 when TXCLK low-to-high edge.
+      // Works on negative TXCLK edge:
       if ((clk_divcnt > 7'd0) && (!txclk) && (!clk_lock)) begin
         clk_divcnt <= clk_divcnt - 7'd1;
         clk_strb   <= 1'b0;
@@ -996,7 +816,8 @@ reg [6:0] clk_divcnt;
     end
   end
 
-    always @(posedge reset or posedge clk) begin // Transmit data register write process.
+    always @(posedge reset or posedge clk) begin
+    
         if (reset) begin
             data_reg <= 8'h00;
         end
@@ -1012,14 +833,14 @@ reg [6:0] clk_divcnt;
         end
     end
 
-  always @(posedge reset or posedge clk) begin // This section handles the shift register.
-    if (reset) begin // On reset condition initialize shift register to zero.
+  always @(posedge reset or posedge clk) begin
+    if (reset) begin
       shift_reg <= 8'h00;
     end else begin
-      if (mclr) begin // Master clear initializes shift register to zero.
+      if (mclr) begin
         shift_reg <= 8'h00;
       end
-      else if ((tr_state == TX_LOAD_SHIFT) && (!tdre)) begin // Load shift register when not empty.
+      else if ((tr_state == TX_LOAD_SHIFT) && (!tdre)) begin
         // If during LOAD_SHIFT the transmitter data register
         // is empty (TDRE = '1') the shift register will not
         // be loaded. When additionally TC = "11", the break
@@ -1042,21 +863,27 @@ reg [6:0] clk_divcnt;
     end
   end
 
-  always @(posedge reset or posedge clk) begin // TDRE flag process.
-    if (reset) begin // On reset condition initialize TDRE to '1' (empty).
+  // Transmit data register empty flag.
+  always @(posedge reset or posedge clk) begin
+    if (reset) begin
       tdre    <= 1'b1;
-      tx_lock <= 1'b0; 
+      tx_lock <= 1'b0;
     end else begin
       if (mclr) begin
         tdre <= 1'b1;
       end
       else if ((tr_next_state == TX_START) && (tr_state != TX_START)) begin
+        // Data has been loaded to shift register, thus data register is free again.
+        // Thanks to Lyndon Amsdon for finding a bug here. The TDRE is set to one once
+        // entering the state now.
         tdre <= 1'b1;
       end
-      else if (cs & ~rw_n & rs & e_clk & ~tx_lock) begin // CPU write to transmit data register.
+      else if (cs & ~rw_n & rs & e_clk & ~tx_lock) begin
         tx_lock <= 1'b1;
       end
-      else if ((!e_clk) && (tx_lock)) begin //
+      else if ((!e_clk) && (tx_lock)) begin
+        // This construction clears TDRE after the falling edge of E
+        // and after the transmit data register has been written to.
         tdre    <= 1'b0;
         tx_lock <= 1'b0;
       end
@@ -1098,13 +925,14 @@ reg [6:0] clk_divcnt;
   always @(*) begin
     case(tr_state)
       TX_IDLE : begin
-        if ((tdre) && (tc == 2'b11)) begin // Break condition.
+        if ((tdre) && (tc == 2'b11)) begin
           tr_next_state = TX_LOAD_SHIFT;
         end
-        else if ((!tdre) && (!cts_n)) begin // Data to transmit and CTS active.
+        else if ((!tdre) && (!cts_n)) begin
+          // Start if data register is not empty.
           tr_next_state = TX_LOAD_SHIFT;
         end
-        else begin // Stay in IDLE.
+        else begin
           tr_next_state = TX_IDLE;
         end
       end

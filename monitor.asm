@@ -9,7 +9,7 @@
 ;       G           - start execution on the current address
 ;       R           - set address to 0x0000
 ;       T           - toggle debug flag, which causes dump memory from 0x0010 on each command completion
-; it uses the 6532 timer to generate delays for serial output, and for LED blink timingű
+; it uses the 6532 timer to generate delays for serial output, and for LED blink timing
 ; it uses a simple bit-banged serial protocol at 4800 baud, 8N1
 ; RX is on bit 4 of port B (pin 6 of 6532)
 ; TX is on bit 5 of port B (pin 7 of 6532)

@@ -2,7 +2,8 @@ import serial
 import time
 
 # Configuration
-PORT = "/dev/tty.usbserial-21110"  
+#PORT = "/dev/tty.usbserial-21110"  
+PORT = "/dev/tty.usbserial-2101"  
 BAUDRATE = 4800
 TX_DELAY = 0.010        # 10 ms
 RX_TIMEOUT = 1.0        # seconds

@@ -28,6 +28,20 @@ test6532:
 	  --device GW1NR-LV9QN88PC6/I5
 	gowin_pack -d GW1N-9C -o test6532.fs test6532_pnr.json
 
+
+test6850:
+	yosys -q \
+	  -p "synth_gowin -top test6850 -json test6850.json -family gw1n" \
+	  src/test6850.v  src/acia_6850.v
+	nextpnr-himbaechel -r \
+	  --json test6850.json \
+	  --write test6850_pnr.json \
+	  --freq 27 \
+	  --vopt family=GW1N-9C \
+	  --vopt cst=tangnano9k.cst \
+	  --device GW1NR-LV9QN88PC6/I5
+	gowin_pack -d GW1N-9C -o test6850.fs test6850_pnr.json	
+
 copyrom:
 	hexdump -v -e '16/1 "%02X " "\n"' ../monitor.bin > src/rom.hex
 
